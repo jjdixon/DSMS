@@ -1,0 +1,224 @@
+---
+title: "NYPD Shooting Incident Data"
+##author: "Josh Dixon"
+##date: "2023-05-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message=FALSE)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+```
+
+The excerpt below is from <http://catalog.data.gov> and describes the data set.
+
+This is a breakdown of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year. This data is manually extracted every quarter and reviewed by the Office of Management Analysis and Planning before being posted on the NYPD website. Each record represents a shooting incident in NYC and includes information about the event, the location and time of occurrence. In addition, information related to suspect and victim demographics is also included. This data can be used by the public to explore the nature of shooting/criminal activity. Please refer to the attached data footnotes for additional information about this dataset.
+
+## Data Retrieval and Exploration
+
+First step is reading the data from a csv which is accessed from a URL. We are making use of the tidyverse library which was added in the setup code chunk.
+
+```{r import_data, message = FALSE}
+##Get current data from file link
+ nypd_shooting <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+```
+
+What does the raw data look like?
+
+```{r rawdata, echo=TRUE}
+head(nypd_shooting)
+
+```
+
+Before moving on to the tidy phase, I wanted to understand some areas I should be mindful.
+
+```{r glimpse, echo=TRUE}
+glimpse(nypd_shooting)
+```
+
+Notice that the OCCUR_DATE is stored as a character. In addition, the PERP and VIC SEX is stored as a character as well. I could consider changing this to a factor if desired.
+
+In addition, I would like to check for duplicates and the existence of NA's.
+
+```{r findDuplicates, echo=TRUE}
+sum(duplicated(nypd_shooting$INCIDENT_KEY))
+```
+
+Next, lets take a look at how many NA's there are by column. During the exploration phase it may be necessary to drop the NA so we can just focus on the incidents with known values.
+
+```{r gender, echo=TRUE}
+colSums(is.na(nypd_shooting))
+```
+
+## Tidy the data
+
+For our exploration, we are going to remove 8 unnecessary columns:
+
+```{r clean_columns, echo=TRUE}
+ nypd_shooting <- nypd_shooting %>%
+select(-c(JURISDICTION_CODE,LOC_CLASSFCTN_DESC, LOCATION_DESC,LOC_OF_OCCUR_DESC,X_COORD_CD, Y_COORD_CD,Latitude,Longitude ))
+```
+
+Next we will mutate the OCCUR_DATE column as by default it is a chr and not a date type.We will also add the day of the week as a number, starting on Monday as well as the Month.
+
+```{r mutate_date, echo=TRUE}
+ nypd_shooting <- nypd_shooting %>%
+mutate(OCCUR_DATE = mdy(OCCUR_DATE))
+## Set the weekstart on Monday
+nypd_shooting$weekday <- wday(nypd_shooting$OCCUR_DATE, week_start=1)
+nypd_shooting$Month <- format(nypd_shooting$OCCUR_DATE, "%B")
+nypd_shooting$Year<-year(nypd_shooting$OCCUR_DATE)
+## We want the graph to sort the month Chronologicallh 
+nypd_shooting <- nypd_shooting %>%
+mutate(Month = factor(Month,levels=month.name))
+```
+
+Before continuing, we will look at the summary.
+
+```{r summary}
+summary(nypd_shooting)
+```
+
+## Data Exploration
+
+After tidy'ing the data, it is time to start exploring the data. With over 27,000 incidents it will be helpful to summarize by different columns to potentially identify commonalities and develop hypothesis for exploration.
+
+### Summarizing by Month and Borough
+
+In order to determine if time of year is a factor in the number of incidents, I am going to summarize by month and by borough. However, you will see that the number of incidents will differ by Borough but would be misleading if we don't account for the population size. In the next section, we will address this.
+
+```{r shootingsbyMonth,echo=TRUE}
+nypd_shooting_bymonth <- nypd_shooting %>%
+group_by(Month,Year,BORO) %>%
+summarise(n=n())
+head(nypd_shooting_bymonth)
+```
+
+### Borough Populations
+
+Borough Population table from <http://www.citypopulation.de/en/usa/newyorkcity/> for 2022 census
+
+| BORO          | POPULATION |
+|---------------|------------|
+| BRONX         | 1379946    |
+| BROOKLYN      | 2590516    |
+| MANHATTAN     | 1596273    |
+| QUEENS        | 2278029    |
+| STATEN ISLAND | 491133     |
+
+We will use the population from the 2022 census and calculate the number of incidents per 1 million.
+
+```{r createBoroDate, echo = TRUE, message=FALSE}
+ Boro_NAME <- c("BRONX","BROOKLYN","MANHATTAN","QUEENS","STATEN ISLAND")
+Boro_POP <- c(1379946,2590516,1596273,2278029,491133)
+boro_info <- data.frame(Boro_NAME,Boro_POP)
+merged_data <- merge(x=nypd_shooting_bymonth,y=boro_info, by.x ="BORO", by.y = "Boro_NAME")
+## Calculate the per 1M people incident rate
+merged_data$Per1M <- floor((merged_data$n/merged_data$Boro_POP)*1000000)
+head(merged_data)
+```
+
+After joining the borough population data with our incidents per month data, we will plot by month in chronological order.
+
+```{r byBoroByMonth, echo=TRUE, message=FALSE}
+ggplot(merged_data,aes(fill=merged_data$BORO,y=merged_data$Per1M,x=merged_data$Month )) +
+geom_bar(position="dodge", stat="identity") +
+  scale_x_discrete(guide = guide_axis(n.dodge=2))+
+  labs(title="Incidents Per 1M by Month",x="Month",y="Incidents Per 1M", fill="Boroughs")
+```
+
+There are a few interesting trends here. First of all, there is an obvious uptick in all boroughs for the summer months. Additionally, Bronx and Brooklyn far out pace in the number of incidents per 1M.
+
+There are lot of factors to consider for what causes heightened shooting activities in the summer months. Some examples are reduced clothing makes it easier to recognize rival gang members, higher chance of encountering others as you spend more time outside, increased free time due to school not being in session, higher temperatures makes individuals more irritable etc. Let's take a look at how the pandemic affected the trends.
+
+```{r SummerMonths, echo=TRUE}
+focus_months <- c('June','July')
+
+#To focus on specific month, leverage the focus_months list.
+nypd_shooting_bymonth_focus <- nypd_shooting %>%
+  #filter(Month %in% focus_months) %>%
+  group_by(Month,Year) %>%
+  summarise(n=n())
+
+
+nypd_shooting_bymonth_focus$date <-paste0(nypd_shooting_bymonth_focus$Month, " ",nypd_shooting_bymonth_focus$Year)
+nypd_shooting_bymonth_focus <- nypd_shooting_bymonth_focus %>%
+ mutate(date = lubridate::dmy(date, truncated = -1))
+ 
+head(nypd_shooting_bymonth_focus)        
+ggplot(nypd_shooting_bymonth_focus,aes(x=nypd_shooting_bymonth_focus$date,y=nypd_shooting_bymonth_focus$n, group=1)) +
+ geom_line()+geom_point()+ scale_x_date(name = 'Year', date_breaks = '1 years',date_labels = '%Y') +
+  labs(title="Incidents by Month 2006-2022",y="Total Incidents")
+```
+
+Interestingly, there was definitive decline in total shootings from 2013 through 2018. After a slight uptick in 2019, there was an massive swing up in 2020. The factors that play into the summer incidents were likely excaberated by the pandemic. To further understand the trend, I would look to incorporate weather and employment data in future analysis.
+
+### Heatmap by Sex and Age Group
+
+With thousands of incidents across 16 years of data, it would be helpful to understand the distribution by sex and age group. I will use a heatmap plot to visually showcase the total number of incidents across the 16 years. There will be a few cleanups steps as we know that the both PERP_SEX and PERP_AGE_GROUP has NA and null values.
+
+```{r heatMap, echo=TRUE}
+data_heatmap3 <- nypd_shooting %>%
+filter(!is.na(PERP_SEX) & !is.na(PERP_AGE_GROUP)) %>%
+group_by(PERP_SEX,PERP_AGE_GROUP) %>%
+summarise(n=n())
+
+unique(data_heatmap3)
+```
+
+Using the unique command, you can see that there is still quite a few data points that are not relevant for our heatmap or look to be bad input. Let's filter further and plot.
+
+```{r heatmapFiltering,echo=TRUE}
+data_heatmap3 <- data_heatmap3 %>%
+filter(!(PERP_SEX == 'U') & !(PERP_SEX == '(null)')) %>%
+filter(!(PERP_AGE_GROUP == '1020') & !(PERP_AGE_GROUP == '940') &  !(PERP_AGE_GROUP=='224') & !(PERP_AGE_GROUP == 'UNKNOWN') )
+
+ggplot(data_heatmap3,aes(data_heatmap3$PERP_AGE_GROUP,data_heatmap3$PERP_SEX,fill=data_heatmap3$n)) + geom_tile() +  scale_fill_gradient(low="white", high="blue") +
+labs(title="Heatmap by sex and age group",x="Age Group", y="Sex",fill="# of Incidents")
+```
+
+It is quite clear that if you wanted to make a meaningful change, your efforts should focus on elements that would impact the male population between the ages of 18 and 24!
+
+### Model
+
+This model will explore if there is a relationship with the monthly temperature in NYC and the number of shooting incidents. We will first start by reading in the NOAA weather data summarized at the monthly level for NYC. We will need to create a matching ID field so that we can merge the weather data with the shooting data. We will then merge the weather data with our monthly incident data and produce a linear model.
+
+```{r model, echo=TRUE}
+#Read in NOAA weather data
+nyc_weather = read_csv("https://raw.githubusercontent.com/jjdixon/DSMS/main/NYC_Weather_NOAA.csv")
+
+#create ID field to match with Shooting data
+nypd_shooting_bymonth_focus$newdate <- ifelse(match(nypd_shooting_bymonth_focus$Month,month.name)<10,paste(nypd_shooting_bymonth_focus$Year,"-0",match(nypd_shooting_bymonth_focus$Month,month.name),sep=""),paste0(nypd_shooting_bymonth_focus$Year,"-",(match(nypd_shooting_bymonth_focus$Month,month.name))))
+
+#merge shooting and weather data
+shooting_weather <- merge(x=nyc_weather,y=nypd_shooting_bymonth_focus,by.x="DATE",by.y="newdate")
+
+#create model
+test_model <- lm(n ~ TAVG, data=shooting_weather)
+summary(test_model)
+shooting_weather <- shooting_weather %>% mutate(pred = predict(test_model))
+
+
+```
+
+The above details show specifics of the model. It is evident that that although there is a general increase in shootings when weather increases, the standard deviation is quite high. The plot below will show that the prediction does in fact follow the general trend but there are several outliers and the general wide spread of monthly incidents totals indicate that there are many other factors to account for. The indicents totals show in blue and the predictions show in red.
+
+```{r plotPredictions, echo=TRUE}
+shooting_weather %>% ggplot() + 
+ geom_point(aes(x=TAVG, y=n),color="blue") +
+ geom_point(aes(x=TAVG, y=pred),color="red") +
+labs(title="Predicting Monthly Shooting Inceidents based on Average Temperature",x="Average Temperature",y="# of Incidents")
+```
+
+### Conclusion
+It is clear that there are several factors to understanding and predicting total shooting incidents per month. My exploration allowed for me to see the impacts of COVID, the time of year, by burough, and the affects of monthly average temperature. I found the the data highlighted the cyclical nature of the monthly incident totals with peaks during the summary. I also found that young males in their early 20's are the predominant shooters. If I was to recommend policy or government programs aimed at reducing shooting incidents I would focus on programs that ramped up during the summer months and engaged the young men.
+
+With regards to my personal bias, I know that my experiences and current world views will drive my general thought process and ideation. Although, I attempted to approach the data with an open mind, I was already aware that violence generally increases during the summer months and therefore I was inclined to see if the data supported the hypothesis. I am also aware that males commit a much higher percent of violent crimes.In this exercise, I do not believe that my bias skewed the results. With regard to possible biases in the data, I would speculate that the race of the individuals was subject to individual reporting. I would also speculate there certain areas shooting incidents go largely unreported due to high rates of crime.
+
+
+#### Session Info
+```{r sessioninfo, echo=FALSE}
+sessionInfo()
+```
